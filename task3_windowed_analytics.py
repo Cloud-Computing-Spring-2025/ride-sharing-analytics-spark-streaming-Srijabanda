@@ -1,50 +1,63 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, window, sum
+from pyspark.sql.functions import from_json, col, sum as _sum, window
 from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
+import os
 
-# Schema for input JSON
+# 1. Create Spark session
+spark = SparkSession.builder \
+    .appName("WindowedFareAnalytics") \
+    .getOrCreate()
+spark.sparkContext.setLogLevel("ERROR")
+
+# 2. Define schema (timestamp as string)
 schema = StructType() \
     .add("trip_id", StringType()) \
     .add("driver_id", StringType()) \
     .add("distance_km", DoubleType()) \
     .add("fare_amount", DoubleType()) \
-    .add("timestamp", StringType())
+    .add("timestamp", StringType())  # string initially
 
-# Spark session
-spark = SparkSession.builder \
-    .appName("Task3_Windowed_Fare_Analytics") \
-    .getOrCreate()
-spark.sparkContext.setLogLevel("WARN")
-
-# Read from socket stream
-lines = spark.readStream.format("socket") \
+# 3. Read from socket
+raw_stream = spark.readStream \
+    .format("socket") \
     .option("host", "localhost") \
-    .option("port", 9999).load()
+    .option("port", 9999) \
+    .load()
 
-# Parse JSON and convert timestamp
-parsed_df = lines.select(from_json(col("value"), schema).alias("data")).select("data.*")
-parsed_df = parsed_df.withColumn("event_time", col("timestamp").cast(TimestampType()))
-parsed_df = parsed_df.withWatermark("event_time", "1 minute")
+# 4. Parse JSON and convert timestamp
+parsed_stream = raw_stream \
+    .select(from_json(col("value"), schema).alias("data")) \
+    .select("data.*") \
+    .withColumn("event_time", col("timestamp").cast(TimestampType()))
 
-# Windowed sum of fare amount (5 min window, 1 min slide)
-windowed_df = parsed_df.groupBy(
-    window(col("event_time"), "5 minutes", "1 minute")
-).agg(
-    sum("fare_amount").alias("total_fare")
-)
+# 5. Windowed aggregation (5-min window sliding every 1 min)
+windowed_agg = parsed_stream \
+    .withWatermark("event_time", "5 minutes") \
+    .groupBy(window(col("event_time"), "5 minutes", "1 minute")) \
+    .agg(_sum("fare_amount").alias("total_fare"))
+# 6. Flatten window column
+flattened = windowed_agg \
+    .select(
+        col("window.start").alias("window_start"),
+        col("window.end").alias("window_end"),
+        col("total_fare")
+    )
 
-# Flatten window struct
-flattened_df = windowed_df.select(
-    col("window.start").alias("window_start"),
-    col("window.end").alias("window_end"),
-    col("total_fare")
-)
+# 7. Define batch writer function
+def write_to_csv(batch_df, batch_id):
+    if not batch_df.rdd.isEmpty():
+        output_path = f"./output_task3/batch_{batch_id}"
+        os.makedirs(output_path, exist_ok=True)
+        batch_df.coalesce(1).write.mode("overwrite").option("header", True).csv(output_path)
+        print(f" Batch {batch_id} written to {output_path}")
+    else:
+        print(f"  Batch {batch_id} is empty – skipping.")
 
-# Write output to CSV
-flattened_df.writeStream \
-    .outputMode("append") \
-    .format("csv") \
-    .option("path", "data/task3_windowed_fare") \
-    .option("checkpointLocation", "checkpoints/task3_windowed_fare") \
-    .start() \
-    .awaitTermination()
+# 8. Write using foreachBatch
+query = flattened.writeStream \
+    .outputMode("update") \
+    .foreachBatch(write_to_csv) \
+    .option("checkpointLocation", "./chk_task3") \
+    .start()
+
+query.awaitTermination()

@@ -1,8 +1,12 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, sum, avg, window
-from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
+from pyspark.sql.functions import from_json, col, sum as _sum, avg
+from pyspark.sql.types import StructType, StringType, DoubleType
+import os
 
-# Schema for input JSON
+# 1. Start Spark session
+spark = SparkSession.builder.appName("RideSharingTask2").getOrCreate()
+
+# 2. Define schema for incoming data
 schema = StructType() \
     .add("trip_id", StringType()) \
     .add("driver_id", StringType()) \
@@ -10,45 +14,36 @@ schema = StructType() \
     .add("fare_amount", DoubleType()) \
     .add("timestamp", StringType())
 
-# Spark session
-spark = SparkSession.builder \
-    .appName("Task2_Windowed_Driver_Aggregation") \
-    .getOrCreate()
-spark.sparkContext.setLogLevel("WARN")
-
-# Read from socket stream
-lines = spark.readStream.format("socket") \
+# 3. Read data from socket
+raw_df = spark.readStream.format("socket") \
     .option("host", "localhost") \
-    .option("port", 9999).load()
+    .option("port", 9999) \
+    .load()
 
-# Parse JSON and convert timestamp
-parsed_df = lines.select(from_json(col("value"), schema).alias("data")).select("data.*")
-parsed_df = parsed_df.withColumn("event_time", col("timestamp").cast(TimestampType()))
-parsed_df = parsed_df.withWatermark("event_time", "1 minute")
+# 4. Parse the incoming JSON
+parsed_df = raw_df.select(from_json(col("value"), schema).alias("data")).select("data.*")
 
-# Aggregate by time window and driver_id
-aggregated_df = parsed_df.groupBy(
-    window(col("event_time"), "5 minutes", "1 minute"),
-    col("driver_id")
-).agg(
-    sum("fare_amount").alias("total_fare"),
+# 5. Real-time aggregations
+agg_df = parsed_df.groupBy("driver_id").agg(
+    _sum("fare_amount").alias("total_fare"),
     avg("distance_km").alias("avg_distance")
 )
 
-# Flatten window struct
-flattened_df = aggregated_df.select(
-    col("window.start").alias("window_start"),
-    col("window.end").alias("window_end"),
-    col("driver_id"),
-    col("total_fare"),
-    col("avg_distance")
-)
+# 6. Define batch writer function
+def write_to_csv(batch_df, batch_id):
+    if not batch_df.rdd.isEmpty():  # Only write if batch has data
+        output_path = f"./output_task2/batch_{batch_id}"
+        os.makedirs(output_path, exist_ok=True)
+        batch_df.coalesce(1).write.mode("overwrite").option("header", True).csv(output_path)
+        print(f"✅ Batch {batch_id} written to {output_path}")
+    else:
+        print(f"⚠  Batch {batch_id} is empty – nothing written.")
+# 7. Start the stream with foreachBatch
+query = agg_df.writeStream \
+    .outputMode("update") \
+    .foreachBatch(write_to_csv) \
+    .option("checkpointLocation", "./chk_task2") \
+    .start()
 
-# Write output to CSV
-flattened_df.writeStream \
-    .outputMode("append") \
-    .format("csv") \
-    .option("path", "data/task2_driver_windowed") \
-    .option("checkpointLocation", "checkpoints/task2_windowed") \
-    .start() \
-    .awaitTermination()
+# 8. Await termination
+query.awaitTermination()

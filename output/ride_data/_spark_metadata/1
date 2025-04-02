@@ -1,0 +1,3 @@
+v1
+{"path":"file:///workspaces/ride-sharing-analytics-spark-streaming-Srijabanda/output/ride_data/part-00000-9646d087-2488-42ab-9fa9-7335180b6df5-c000.csv","size":215,"isDir":false,"modificationTime":1743567920370,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///workspaces/ride-sharing-analytics-spark-streaming-Srijabanda/output/ride_data/part-00001-beb1736b-4150-48c7-bdbb-faf6dc55f964-c000.csv","size":215,"isDir":false,"modificationTime":1743567920386,"blockReplication":1,"blockSize":33554432,"action":"add"}

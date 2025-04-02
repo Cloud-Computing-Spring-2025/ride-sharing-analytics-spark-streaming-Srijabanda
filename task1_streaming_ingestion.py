@@ -1,34 +1,38 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col
-from pyspark.sql.types import StructType, StringType, DoubleType
+from pyspark.sql.functions import col, from_json
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, FloatType, TimestampType
 
-# Schema for input JSON
-schema = StructType() \
-    .add("trip_id", StringType()) \
-    .add("driver_id", StringType()) \
-    .add("distance_km", DoubleType()) \
-    .add("fare_amount", DoubleType()) \
-    .add("timestamp", StringType())
-
-# Spark session
+# Initialize Spark session
 spark = SparkSession.builder \
-    .appName("Task1_Streaming_Ingestion") \
+    .appName("RideSharingStreaming") \
     .getOrCreate()
-spark.sparkContext.setLogLevel("WARN")
 
-# Read from socket stream
-lines = spark.readStream.format("socket") \
+# Define schema for the incoming data
+schema = StructType([
+    StructField("trip_id", StringType(), True),
+    StructField("driver_id", IntegerType(), True),
+    StructField("distance_km", FloatType(), True),
+    StructField("fare_amount", FloatType(), True),
+    StructField("timestamp", StringType(), True)
+])
+
+# Ingest data from socket
+ride_data_stream = spark.readStream \
+    .format("socket") \
     .option("host", "localhost") \
-    .option("port", 9999).load()
+    .option("port", 9999) \
+    .load()
 
-# Parse JSON to structured DataFrame
-parsed_df = lines.select(from_json(col("value"), schema).alias("data")).select("data.*")
+# Parse the incoming JSON data into columns
+ride_events = ride_data_stream.select(from_json(col("value"), schema).alias("data")).select("data.*")
 
-# Write parsed data to CSV
-parsed_df.writeStream \
-    .format("csv") \
+# Output the parsed data to a CSV file in your workspace
+query = ride_events.writeStream \
     .outputMode("append") \
-    .option("path", "data/task1_output") \
-    .option("checkpointLocation", "checkpoints/task1") \
-    .start() \
-    .awaitTermination()
+    .format("csv") \
+    .option("path", "output/ride_data") \
+    .option("checkpointLocation", "checkpoint") \
+    .trigger(processingTime="10 seconds") \
+    .start()
+
+query.awaitTermination()
